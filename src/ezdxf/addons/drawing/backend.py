@@ -13,8 +13,10 @@ from ezdxf.addons.drawing.config import Configuration
 from ezdxf.addons.drawing.properties import Properties, BackendProperties
 from ezdxf.addons.drawing.type_hints import Color
 from ezdxf.entities import DXFGraphic
+from ezdxf.fonts.fonts import AbstractFont
 from ezdxf.math import Vec2, Matrix44
 from ezdxf.render import hatching
+from ezdxf.math.bbox import BoundingBox2d
 from ezdxf.npshapes import NumpyPath2d, NumpyPoints2d, single_paths
 
 BkPath2d: TypeAlias = NumpyPath2d
@@ -260,6 +262,20 @@ class BackendInterface(ABC):
 
         """
         self.draw_solid_lines(render_hatch_pattern(paths, pattern), properties)
+
+    def draw_text(
+        self,
+        text: str,
+        bbox: BoundingBox2d,
+        transform: Matrix44,
+        properties: BackendProperties,
+        font: AbstractFont,
+        cap_height: float,
+    ) -> None:
+        """Handle rendering of text with `TextPolicy.NATIVE`. If the backend does not support
+        text data then this method can do nothing.
+        """
+        pass
 
     @abstractmethod
     def clear(self) -> None:

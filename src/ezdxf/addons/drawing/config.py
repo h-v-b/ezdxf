@@ -159,6 +159,8 @@ class TextPolicy(Enum):
         OUTLINE: text is rendered as outline paths
         REPLACE_RECT: replace text by a rectangle
         REPLACE_FILL: replace text by a filled rectangle
+        NATIVE: for supported backends, output as text instead of rendering to shapes.
+            For unsupported backends, text will be ignored.
         IGNORE: ignore text entirely
 
     """
@@ -167,6 +169,7 @@ class TextPolicy(Enum):
     OUTLINE = auto()
     REPLACE_RECT = auto()
     REPLACE_FILL = auto()
+    NATIVE = auto()
     IGNORE = auto()
 
 
