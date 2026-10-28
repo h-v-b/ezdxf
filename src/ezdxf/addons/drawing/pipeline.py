@@ -33,7 +33,13 @@ from ezdxf.tools.clipping_portal import (
     find_best_clipping_shape,
 )
 from ezdxf.layouts import Layout
-from .backend import BackendInterface, BkPath2d, BkPoints2d, ImageData
+from .backend import (
+    BackendInterface,
+    BkPath2d,
+    BkPoints2d,
+    ImageData,
+    HatchPatternLine,
+)
 from .config import LinePolicy, TextPolicy, ColorPolicy, Configuration
 from .properties import BackendProperties, Filling
 from .properties import Properties, RenderContext
@@ -129,6 +135,14 @@ class AbstractPipeline(abc.ABC):
     @abc.abstractmethod
     def draw_image(self, image_data: ImageData, properties: Properties) -> None: ...
 
+    def draw_hatch_pattern(
+        self,
+        paths: Iterable[Path],
+        pattern: Sequence[HatchPatternLine],
+        properties: Properties,
+    ) -> None:
+        raise NotImplementedError
+
     @abc.abstractmethod
     def finalize(self) -> None: ...
 
@@ -178,6 +192,14 @@ class RenderStage2d(abc.ABC):
 
     @abc.abstractmethod
     def draw_image(self, image_data: ImageData, properties: Properties) -> None: ...
+
+    @abc.abstractmethod
+    def draw_hatch_pattern(
+        self,
+        paths: list[BkPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: Properties,
+    ) -> None: ...
 
 
 class RenderPipeline2d(AbstractPipeline):
@@ -412,6 +434,16 @@ class RenderPipeline2d(AbstractPipeline):
     def draw_image(self, image_data: ImageData, properties: Properties) -> None:
         self._pipeline.draw_image(image_data, properties)
 
+    def draw_hatch_pattern(
+        self,
+        paths: Iterable[Path],
+        pattern: Sequence[HatchPatternLine],
+        properties: Properties,
+    ) -> None:
+        self._pipeline.draw_hatch_pattern(
+            list(map(BkPath2d, paths)), pattern, properties
+        )
+
 
 class ClippingStage2d(RenderStage2d):
     def __init__(
@@ -480,6 +512,24 @@ class ClippingStage2d(RenderStage2d):
         if len(paths) == 0:
             return
         self.next_stage.draw_filled_paths(paths, properties)
+
+    def draw_hatch_pattern(
+        self,
+        paths: list[BkPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: Properties,
+    ) -> None:
+        clipping_portal = self.clipping_portal
+        max_sagitta = self.config.max_flattening_distance
+
+        if clipping_portal.is_active:
+            paths = clipping_portal.clip_filled_paths(paths, max_sagitta)
+            # the clipping stages can transform the content, e.g. VIEWPORT
+            m = clipping_portal.transform_matrix(Matrix44())
+            pattern = [line.transform(m) for line in pattern]
+        if len(paths) == 0:
+            return
+        self.next_stage.draw_hatch_pattern(paths, pattern, properties)
 
     def draw_filled_polygon(self, points: BkPoints2d, properties: Properties) -> None:
         clipping_portal = self.clipping_portal
@@ -649,6 +699,14 @@ class LinetypeStage2d(RenderStage2d):
     def draw_image(self, image_data: ImageData, properties: Properties) -> None:
         self.next_stage.draw_image(image_data, properties)
 
+    def draw_hatch_pattern(
+        self,
+        paths: list[BkPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: Properties,
+    ) -> None:
+        self.next_stage.draw_hatch_pattern(paths, pattern, properties)
+
 
 class BackendStage2d(RenderStage2d):
     """Send data to the output backend."""
@@ -688,6 +746,14 @@ class BackendStage2d(RenderStage2d):
 
     def draw_image(self, image_data: ImageData, properties: Properties) -> None:
         self.backend.draw_image(image_data, self.converter(properties))
+
+    def draw_hatch_pattern(
+        self,
+        paths: list[BkPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: Properties,
+    ) -> None:
+        self.backend.draw_hatch_pattern(paths, pattern, self.converter(properties))
 
 
 def _mask_image(image_data: ImageData, outer_bounds: list[BkPoints2d]) -> None:

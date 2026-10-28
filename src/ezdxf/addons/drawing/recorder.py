@@ -18,7 +18,7 @@ from ezdxf.npshapes import NumpyPath2d, NumpyPoints2d, EmptyShapeError
 from ezdxf.tools import take2
 from ezdxf.tools.clipping_portal import ClippingRect
 
-from .backend import BackendInterface, ImageData
+from .backend import BackendInterface, ImageData, HatchPatternLine
 from .config import Configuration
 from .properties import BackendProperties
 from .type_hints import Color
@@ -102,6 +102,18 @@ class FilledPathsRecord(DataRecord):
     def transform_inplace(self, m: Matrix44) -> None:
         for path in self.paths:
             path.transform_inplace(m)
+
+
+class HatchPatternRecord(FilledPathsRecord):
+    def __init__(
+        self, paths: Sequence[NumpyPath2d], pattern: Sequence[HatchPatternLine]
+    ) -> None:
+        super().__init__(paths)
+        self.pattern: Sequence[HatchPatternLine] = pattern
+
+    def transform_inplace(self, m: Matrix44) -> None:
+        super().transform_inplace(m)
+        self.pattern = tuple(line.transform(m) for line in self.pattern)
 
 
 class ImageRecord(DataRecord):
@@ -196,6 +208,17 @@ class Recorder(BackendInterface):
 
         assert isinstance(paths[0], NumpyPath2d)
         self.store(FilledPathsRecord(paths), properties)
+
+    def draw_hatch_pattern(
+        self,
+        paths: Sequence[NumpyPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: BackendProperties,
+    ) -> None:
+        if len(paths) == 0:
+            return
+        assert isinstance(paths[0], NumpyPath2d)
+        self.store(HatchPatternRecord(tuple(paths), tuple(pattern)), properties)
 
     def draw_image(self, image_data: ImageData, properties: BackendProperties) -> None:
         # preserve the boundary in image_data in pixel coordinates
@@ -300,6 +323,8 @@ class Player:
                 backend.draw_solid_lines(take2(record.lines.vertices()), properties)
             elif isinstance(record, PathRecord):
                 backend.draw_path(record.path, properties)
+            elif isinstance(record, HatchPatternRecord):
+                backend.draw_hatch_pattern(record.paths, record.pattern, properties)
             elif isinstance(record, FilledPathsRecord):
                 backend.draw_filled_paths(record.paths, properties)
             elif isinstance(record, ImageRecord):

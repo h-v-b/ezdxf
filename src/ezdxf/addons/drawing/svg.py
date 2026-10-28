@@ -12,7 +12,13 @@ from ezdxf.path import Command
 
 
 from .type_hints import Color
-from .backend import BackendInterface, BkPath2d, BkPoints2d, ImageData
+from .backend import (
+    BackendInterface,
+    BkPath2d,
+    BkPoints2d,
+    ImageData,
+    HatchPatternLine,
+)
 from .config import Configuration, LineweightPolicy
 from .properties import BackendProperties
 from . import layout, recorder
@@ -160,6 +166,8 @@ CMD_C3_REL = "q {0.x:.0f} {0.y:.0f} {1.x:.0f} {1.y:.0f}"
 CMD_C4_ABS = "C {0.x:.0f} {0.y:.0f} {1.x:.0f} {1.y:.0f} {2.x:.0f} {2.y:.0f}"
 CMD_C4_REL = "c {0.x:.0f} {0.y:.0f} {1.x:.0f} {1.y:.0f} {2.x:.0f} {2.y:.0f}"
 CMD_CONT = "{0.x:.0f} {0.y:.0f}"
+CMD_M_ABS_F = "M {0.x:.1f} {0.y:.1f}"
+CMD_L_ABS_F = "L {0.x:.1f} {0.y:.1f}"
 
 
 class SVGRenderBackend(BackendInterface):
@@ -214,7 +222,9 @@ class SVGRenderBackend(BackendInterface):
             height=f"{page.height_in_mm:g}mm",
             viewBox=f"0 0 {view_box_width} {view_box_height}",
         )
-        self.styles = Styles(ET.SubElement(self.root, "defs"))
+        self.defs = ET.SubElement(self.root, "defs")
+        self.styles = Styles(self.defs)
+        self._patterns: dict[tuple, str] = dict()
         self.background = ET.SubElement(
             self.root,
             "rect",
@@ -252,6 +262,61 @@ class SVGRenderBackend(BackendInterface):
         fill_color, fill_opacity = self.resolve_color(properties.color)
         cls = self.styles.get_class(fill=fill_color, fill_opacity=fill_opacity)
         element.set("class", cls)
+
+    def get_pattern_id(
+        self, pattern_line: HatchPatternLine, color: Color, stroke_width: int
+    ) -> str:
+        """Returns the id of a <pattern> element for the given pattern line or an
+        empty string for an invalid pattern line.
+        """
+        tile = pattern_line.tile()
+        if tile is None:
+            return ""
+        key = (
+            tile.origin.round(3),
+            tile.u.round(3),
+            tile.v.round(3),
+            pattern_line.dashes,
+            color,
+            stroke_width,
+        )
+        try:
+            return self._patterns[key]
+        except KeyError:
+            pass
+        pattern_id = f"P{len(self._patterns) + 1:X}"
+        matrix = " ".join(f"{value:g}" for value in (*tile.u, *tile.v, *tile.origin))
+        pattern = ET.SubElement(
+            self.defs,
+            "pattern",
+            id=pattern_id,
+            patternUnits="userSpaceOnUse",
+            width="1",
+            height="1",
+            patternTransform=f"matrix({matrix})",
+        )
+        # The pattern transformation maps the unit square to the tile, the tile
+        # content is drawn in the user space to get round dots and an undistorted
+        # stroke width:
+        inverse = " ".join(f"{value:g}" for value in tile.inverse())
+        d = " ".join(
+            f"{CMD_M_ABS_F.format(s)} {CMD_L_ABS_F.format(e)}" for s, e in tile.lines
+        )
+        ET.SubElement(
+            pattern,
+            "path",
+            d=d,
+            transform=f"matrix({inverse} 0 0)",
+            fill="none",
+            stroke=color,
+            attrib={
+                "stroke-width": str(stroke_width),
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+            },
+        )
+        self._patterns[key] = pattern_id
+        return pattern_id
 
     def resolve_color(self, color: Color) -> tuple[Color, float]:
         return color[:7], alpha_to_opacity(color[7:9])
@@ -317,6 +382,27 @@ class SVGRenderBackend(BackendInterface):
 
     def draw_image(self, image_data: ImageData, properties: BackendProperties) -> None:
         pass  # TODO: not implemented
+
+    def draw_hatch_pattern(
+        self,
+        paths: Sequence[BkPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: BackendProperties,
+    ) -> None:
+        d = " ".join(self.make_path_str(p, close=True) for p in paths if len(p))
+        if not d:
+            return
+        color, opacity = self.resolve_color(properties.color)
+        stroke_width = self.resolve_stroke_width(properties.lineweight)
+        for pattern_line in pattern:
+            pattern_id = self.get_pattern_id(pattern_line, color, stroke_width)
+            if not pattern_id:
+                continue
+            element = ET.SubElement(self.entities, "path", d=d)
+            cls = self.styles.get_class(
+                fill=f"url(#{pattern_id})", fill_opacity=opacity
+            )
+            element.set("class", cls)
 
     @staticmethod
     def make_polyline_str(points: Sequence[Vec2], close=False) -> str:

@@ -31,7 +31,11 @@ from ezdxf.addons.drawing.config import (
     HatchPolicy,
     ImagePolicy,
 )
-from ezdxf.addons.drawing.backend import BackendInterface, ImageData
+from ezdxf.addons.drawing.backend import (
+    BackendInterface,
+    ImageData,
+    HatchPatternLine,
+)
 from ezdxf.addons.drawing.properties import (
     RenderContext,
     OLE2FRAME_COLOR,
@@ -604,7 +608,8 @@ class UniversalFrontend:
             show_only_outline = True
 
         polygon = cast(DXFPolygon, entity)
-        if filling.type == Filling.PATTERN:
+        native_pattern = hatch_policy == HatchPolicy.NATIVE_PATTERN
+        if filling.type == Filling.PATTERN and not native_pattern:
             if loops is None:
                 loops = hatching.hatch_boundary_paths(polygon, filter_text_boxes=True)
             try:
@@ -614,7 +619,7 @@ class UniversalFrontend:
             else:
                 return
 
-        # draw SOLID filling
+        # draw SOLID filling or native PATTERN filling
         ocs = polygon.ocs()
         # all OCS coordinates have the same z-axis stored as vector (0, 0, z),
         # default (0, 0, 0)
@@ -631,8 +636,22 @@ class UniversalFrontend:
             for p in ignore_text_boxes(paths):
                 self.pipeline.draw_path(p, properties)
             return
-        if paths:
-            self.pipeline.draw_filled_paths(ignore_text_boxes(paths), properties)
+        if not paths:
+            return
+        if filling.type == Filling.PATTERN:  # HatchPolicy.NATIVE_PATTERN
+            try:
+                pattern = hatch_pattern_lines(
+                    polygon, self.config.min_hatch_line_distance
+                )
+            except hatching.DenseHatchingLinesError:
+                pass  # fallthrough to solid fill rendering
+            else:
+                if pattern:
+                    self.pipeline.draw_hatch_pattern(
+                        ignore_text_boxes(paths), pattern, properties
+                    )
+                return
+        self.pipeline.draw_filled_paths(ignore_text_boxes(paths), properties)
 
     def draw_mpolygon_entity(self, entity: DXFGraphic, properties: Properties):
         def resolve_fill_color() -> str:
@@ -997,6 +1016,34 @@ def closed_loops(
                 sub_path.close()
                 loops.append(sub_path)
     return loops
+
+
+def hatch_pattern_lines(
+    polygon: DXFPolygon, min_hatch_line_distance: float
+) -> list[HatchPatternLine]:
+    """Returns the pattern lines of HATCH and MPOLYGON entities in WCS, projected
+    onto the xy-plane.
+
+    Raises:
+        DenseHatchingLinesError: hatching lines are too narrow
+
+    """
+    ocs = polygon.ocs()
+    elevation = polygon.dxf.elevation.z
+    lines: list[HatchPatternLine] = []
+    for baseline in hatching.pattern_baselines(
+        polygon, min_hatch_line_distance=min_hatch_line_distance
+    ):
+        origin = Vec3(baseline.origin.x, baseline.origin.y, elevation)
+        lines.append(
+            HatchPatternLine(
+                Vec2(ocs.to_wcs(origin)),
+                Vec2(ocs.to_wcs(baseline.direction)),
+                Vec2(ocs.to_wcs(baseline.offset)),
+                tuple(baseline.line_pattern),
+            )
+        )
+    return lines
 
 
 def ignore_text_boxes(paths: Iterable[Path]) -> Iterable[Path]:

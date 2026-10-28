@@ -64,6 +64,10 @@ class HatchPolicy(Enum):
         IGNORE: do not show HATCH entities at all
         SHOW_OUTLINE: show only the outline of HATCH entities
         SHOW_SOLID: show HATCH entities as solid filling regardless of the pattern
+        NATIVE_PATTERN: same as NORMAL, but pattern fillings are passed to the
+            backend as boundary paths and pattern lines, backends with native
+            pattern support (PDF, SVG) create much smaller output files, all other
+            backends render the pattern as solid lines
 
     """
 
@@ -72,6 +76,7 @@ class HatchPolicy(Enum):
     SHOW_OUTLINE = auto()
     SHOW_SOLID = auto()
     SHOW_APPROXIMATE_PATTERN = auto()  # ignored since v0.18.1 == NORMAL
+    NATIVE_PATTERN = auto()
 
 
 class LineweightPolicy(Enum):

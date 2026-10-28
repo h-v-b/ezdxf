@@ -2,17 +2,19 @@
 # License: MIT License
 from __future__ import annotations
 from abc import ABC, abstractmethod, ABCMeta
-from typing import Optional, Iterable
+from typing import Optional, Iterable, Sequence
 
 import numpy as np
 from typing_extensions import TypeAlias
 import dataclasses
+import math
 
 from ezdxf.addons.drawing.config import Configuration
 from ezdxf.addons.drawing.properties import Properties, BackendProperties
 from ezdxf.addons.drawing.type_hints import Color
 from ezdxf.entities import DXFGraphic
 from ezdxf.math import Vec2, Matrix44
+from ezdxf.render import hatching
 from ezdxf.npshapes import NumpyPath2d, NumpyPoints2d, single_paths
 
 BkPath2d: TypeAlias = NumpyPath2d
@@ -61,6 +63,132 @@ class ImageData:
         _, image_height = self.image_size()
         _IMAGE_FLIP_MATRIX[13] = image_height
         return Matrix44(_IMAGE_FLIP_MATRIX)
+
+
+@dataclasses.dataclass(frozen=True)
+class HatchPatternLine:
+    """A hatch pattern line as an infinite family of parallel lines.
+
+    The n-th line of the family starts at `origin` + n * `offset` and runs in the
+    direction of `direction`. The line pattern starts at the origin of each line.
+
+    Attributes:
+        origin: origin of the line family
+        direction: line direction, the length of this vector is the unit of the
+            `dashes` values
+        offset: offset from one line to the next line
+        dashes: line pattern as multiples of the length of `direction`,
+            a value > 0.0 is a dash, a value < 0.0 is a gap and a value of 0.0 is a
+            point, an empty sequence is a solid line
+
+    """
+
+    origin: Vec2
+    direction: Vec2
+    offset: Vec2
+    dashes: tuple[float, ...] = tuple()
+
+    def transform(self, m: Matrix44) -> HatchPatternLine:
+        """Returns a new pattern line transformed by the affine transformation `m`."""
+        return HatchPatternLine(
+            Vec2(m.transform(self.origin)),
+            Vec2(m.transform_direction(self.direction)),
+            Vec2(m.transform_direction(self.offset)),
+            self.dashes,
+        )
+
+    def tile(self) -> Optional[PatternTile]:
+        """Returns the :class:`PatternTile` of a tiling pattern for this pattern line
+        or ``None`` for an invalid pattern line.
+        """
+        direction = self.direction
+        if direction.magnitude < 1e-12:
+            return None
+        dashes = self.dashes
+        pattern_length = math.fsum(abs(dash) for dash in dashes)
+        if pattern_length * direction.magnitude < 1e-9:  # solid line
+            dashes = tuple()
+            normal = direction.orthogonal().normalize()
+            line_distance = self.offset.dot(normal)
+            # the tile of a solid line does not have to be sheared:
+            u = direction.normalize(abs(line_distance))
+            v = normal * line_distance
+        else:
+            u = direction * pattern_length
+            # The line n + k shifted by k pattern repetitions is the same line, this
+            # reduces the shearing of the tile, which causes rendering errors in
+            # some PDF viewers.
+            v = self.offset - u * round(self.offset.dot(u) / u.dot(u))
+        if abs(u.det(v)) < 1e-12:
+            return None
+
+        # Move the tile borders away from the pattern lines, renderers which draw
+        # the tiles as separate bitmaps split lines and dots at the tile borders:
+        # the pattern line is placed in the middle of the tile and the tile
+        # starts in the middle of the longest gap of the line pattern.
+        shift = v * -0.5
+        gap_center = 0.0
+        max_gap = 0.0
+        position = 0.0
+        for dash in dashes:
+            if dash < max_gap:
+                max_gap = dash
+                gap_center = position - dash * 0.5
+            position += abs(dash)
+        shift += direction * gap_center
+        origin = self.origin + shift
+
+        # include the pattern lines of adjacent tiles to avoid gaps at the tile
+        # borders, e.g. caused by round line caps
+        lines: list[tuple[Vec2, Vec2]] = []
+        for row in (-1, 0, 1):
+            start = v * row - shift
+            if not dashes:
+                lines.append((start - u, start + u * 2))
+                continue
+            start -= u
+            for _ in range(3):
+                for dash in dashes:
+                    end = start + direction * abs(dash)
+                    if dash > 0.0:
+                        lines.append((start, end))
+                    elif dash == 0.0:
+                        lines.append((start, start))
+                    start = end
+        return PatternTile(origin, u, v, lines)
+
+
+@dataclasses.dataclass(frozen=True)
+class PatternTile:
+    """The tile of a tiling pattern.
+
+    The tile is the parallelogram spanned by the vectors `u` and `v` located at
+    `origin`.  The `lines` are relative to the `origin` and are not transformed by
+    the tile vectors to preserve round dots and an undistorted line width.
+
+    Attributes:
+        origin: tile origin
+        u: first tile vector
+        v: second tile vector
+        lines: pattern lines as (start, end) tuples, points have the same start- and
+            end point
+
+    """
+
+    origin: Vec2
+    u: Vec2
+    v: Vec2
+    lines: list[tuple[Vec2, Vec2]]
+
+    def inverse(self) -> tuple[float, float, float, float]:
+        """Returns the linear part of the inverse tile transformation as
+        (a, b, c, d) values of the affine transformation (a, b, c, d, 0, 0) used by
+        PDF and SVG.
+        """
+        u = self.u
+        v = self.v
+        det = u.det(v)
+        return v.y / det, -u.y / det, -v.x / det, u.x / det
 
 
 class BackendInterface(ABC):
@@ -116,6 +244,22 @@ class BackendInterface(ABC):
     @abstractmethod
     def draw_image(self, image_data: ImageData, properties: BackendProperties) -> None:
         raise NotImplementedError
+
+    def draw_hatch_pattern(
+        self,
+        paths: Sequence[BkPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: BackendProperties,
+    ) -> None:
+        """Draw a hatch `pattern` clipped by the boundary `paths`, holes are handled
+        by the even-odd method. This method is called only for the hatch policy
+        :attr:`HatchPolicy.NATIVE_PATTERN`.
+
+        The default implementation renders the pattern as solid lines, backends
+        which support native hatch patterns can override this method.
+
+        """
+        self.draw_solid_lines(render_hatch_pattern(paths, pattern), properties)
 
     @abstractmethod
     def clear(self) -> None:
@@ -263,3 +407,28 @@ def oriented_paths(paths: Iterable[BkPath2d]) -> tuple[list[BkPath2d], list[BkPa
     for p in holes:
         p.clockwise()
     return external_paths, holes
+
+
+def render_hatch_pattern(
+    paths: Sequence[BkPath2d], pattern: Sequence[HatchPatternLine]
+) -> list[tuple[Vec2, Vec2]]:
+    """Returns the hatch `pattern` clipped by the boundary `paths` as solid lines."""
+    boundary_paths = [p.to_path() for p in paths]
+    lines: list[tuple[Vec2, Vec2]] = []
+    for pattern_line in pattern:
+        unit = pattern_line.direction.magnitude
+        try:
+            baseline = hatching.HatchBaseLine(
+                # move the origin a small amount to avoid intersections with
+                # boundary corner points:
+                pattern_line.origin + pattern_line.offset * 0.0005,
+                pattern_line.direction,
+                pattern_line.offset,
+                [dash * unit for dash in pattern_line.dashes],
+            )
+        except hatching.HatchingError:
+            continue
+        for line in hatching.hatch_paths(baseline, boundary_paths):
+            line_pattern = baseline.pattern_renderer(line.distance)
+            lines.extend(line_pattern.render(line.start, line.end))
+    return lines

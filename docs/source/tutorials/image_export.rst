@@ -70,7 +70,7 @@ There are many configuration options:
 
     - :class:`~ezdxf.addons.drawing.config.LineweightPolicy` - relative, absolute or relative fixed lineweight
     - :class:`~ezdxf.addons.drawing.config.LinePolicy` - solid or accurate linetypes
-    - :class:`~ezdxf.addons.drawing.config.HatchPolicy` - normal, ignore, only outlines or always solid fill
+    - :class:`~ezdxf.addons.drawing.config.HatchPolicy` - normal, native patterns (PDF, SVG), ignore, only outlines or always solid fill
     - :class:`~ezdxf.addons.drawing.config.ColorPolicy` - color, black, white, monochrome, ...
     - :class:`~ezdxf.addons.drawing.config.BackgroundPolicy` - default, black, white, off (transparent) and custom
     - :class:`~ezdxf.addons.drawing.config.TextPolicy` - filling, outline, ignore, ...

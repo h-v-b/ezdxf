@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import math
-from typing import Iterable, no_type_check, Any
+from typing import Iterable, Sequence, no_type_check, Any
 import copy
 
 import PIL.Image
 import numpy as np
 
-from ezdxf.math import Vec2, BoundingBox2d
+from ezdxf.math import Vec2, BoundingBox2d, Matrix44
 from ezdxf.colors import RGB
 from ezdxf.path import Command
 from ezdxf.version import __version__
 from ezdxf.lldxf.validator import make_table_key as layer_key
 
 from .type_hints import Color
-from .backend import BackendInterface, BkPath2d, BkPoints2d, ImageData
+from .backend import (
+    BackendInterface,
+    BkPath2d,
+    BkPoints2d,
+    ImageData,
+    HatchPatternLine,
+)
 from .config import Configuration, LineweightPolicy
 from .properties import BackendProperties
 from . import layout, recorder
@@ -206,6 +212,8 @@ class PyMuPdfRenderBackend(BackendInterface):
         self._optional_content_groups: dict[str, int] = {}
         self._stroke_width_cache: dict[float, float] = {}
         self._color_cache: dict[str, tuple[float, float, float]] = {}
+        self._tiling_patterns: dict[tuple, str] = {}
+        self._page_resources: set[str] = set()
         self.page_width_in_pt = int(page.width_in_mm * MM_TO_POINTS)
         self.page_height_in_pt = int(page.height_in_mm * MM_TO_POINTS)
         # LineweightPolicy.ABSOLUTE:
@@ -237,6 +245,9 @@ class PyMuPdfRenderBackend(BackendInterface):
         # The page content is stored in a shared shape:
         self.content_shape = self.page.new_shape()
         # see also: https://github.com/pymupdf/PyMuPDF/issues/3800
+        # transformation from page coordinates to the default PDF coordinate space:
+        a, b, c, d, e, f = self.content_shape.ipctm
+        self.pdf_matrix = Matrix44([a, b, 0, 0, c, d, 0, 0, 0, 0, 1, 0, e, f, 0, 1])
         
     def get_pdf_bytes(self) -> bytes:
         return self.doc.tobytes()
@@ -418,6 +429,117 @@ class PyMuPdfRenderBackend(BackendInterface):
             oc=self.get_optional_content_group(properties.layer),
         )
 
+    def draw_hatch_pattern(
+        self,
+        paths: Sequence[BkPath2d],
+        pattern: Sequence[HatchPatternLine],
+        properties: BackendProperties,
+    ) -> None:
+        shape = self.content_shape
+        for p in paths:
+            add_path_to_shape(shape, p, close=True)
+        clipping_path = shape.draw_cont
+        shape.draw_cont = ""
+        if not clipping_path:
+            return
+        color = self.resolve_color(properties.color)
+        width = self.resolve_stroke_width(properties.lineweight)
+        names = [self.get_tiling_pattern(line, color, width) for line in pattern]
+        bbox = BoundingBox2d()
+        for p in paths:
+            bbox.extend(self.pdf_matrix.fast_2d_transform(p.extents()))
+        x, y = bbox.extmin
+        w, h = bbox.size
+        fill_area = f"{x:.3f} {y:.3f} {w:.3f} {h:.3f} re f\n"
+
+        content = ["q\n", clipping_path, "W* n\n"]
+        opacity = alpha_to_opacity(properties.color[7:9])
+        if opacity < 1.0:
+            content.insert(1, f"/{self.get_ext_gstate(opacity)} gs\n")
+        for name in names:
+            if name:
+                content.append(f"/Pattern cs /{name} scn\n")
+                content.append(fill_area)
+        content.append("Q\n")
+        oc = self.get_optional_content_group(properties.layer)
+        if oc:
+            content.insert(0, f"/OC /{self.get_oc_property(oc)} BDC\n")
+            content.append("EMC\n")
+        shape.totalcont += "".join(content)
+
+    def get_tiling_pattern(
+        self,
+        pattern_line: HatchPatternLine,
+        color: tuple[float, float, float],
+        stroke_width: float,
+    ) -> str:
+        """Returns the resource name of a tiling pattern for the given pattern line
+        or an empty string for an invalid pattern line.
+        """
+        tile = pattern_line.transform(self.pdf_matrix).tile()
+        if tile is None:
+            return ""
+        key = (
+            tile.origin.round(6),
+            tile.u.round(6),
+            tile.v.round(6),
+            pattern_line.dashes,
+            color,
+            stroke_width,
+        )
+        try:
+            return self._tiling_patterns[key]
+        except KeyError:
+            pass
+        # The pattern matrix maps the unit square to the tile, the tile content is
+        # drawn in the default PDF coordinate space to get round dots and an
+        # undistorted line width:
+        inverse = " ".join(_fmt(value) for value in tile.inverse())
+        r, g, b = (_fmt(value) for value in color)
+        content: list[str] = [
+            f"{inverse} 0 0 cm\n",
+            f"{_fmt(stroke_width)} w 1 J 1 j {r} {g} {b} RG\n",
+        ]
+        for start, end in tile.lines:
+            content.append(f"{_fmt_vec(start)} m {_fmt_vec(end)} l\n")
+        content.append("S\n")
+
+        matrix = " ".join(_fmt(value) for value in (*tile.u, *tile.v, *tile.origin))
+        xref = self.doc.get_new_xref()
+        self.doc.update_object(
+            xref,
+            "<</Type/Pattern/PatternType 1/PaintType 1/TilingType 1"
+            f"/BBox[0 0 1 1]/XStep 1/YStep 1/Matrix[{matrix}]/Resources<<>>>>",
+        )
+        self.doc.update_stream(xref, "".join(content).encode())
+        name = f"EzdxfP{len(self._tiling_patterns)}"
+        self.set_page_resource("Pattern", name, f"{xref} 0 R")
+        self._tiling_patterns[key] = name
+        return name
+
+    def get_ext_gstate(self, opacity: float) -> str:
+        name = f"EzdxfGS{round(opacity * 255)}"
+        if name not in self._page_resources:
+            self.set_page_resource("ExtGState", name, f"<</ca {_fmt(opacity)}>>")
+        return name
+
+    def get_oc_property(self, oc: int) -> str:
+        name = f"EzdxfOC{oc}"
+        if name not in self._page_resources:
+            self.set_page_resource("Properties", name, f"{oc} 0 R")
+        return name
+
+    def set_page_resource(self, category: str, name: str, value: str) -> None:
+        doc = self.doc
+        xref = self.page.xref
+        key = f"Resources/{category}/{name}"
+        kind, ref = doc.xref_get_key(xref, "Resources")
+        if kind == "xref":  # resources dictionary is an indirect object
+            xref = int(ref.split()[0])
+            key = f"{category}/{name}"
+        doc.xref_set_key(xref, key, value)
+        self._page_resources.add(name)
+
     def configure(self, config: Configuration) -> None:
         self.lineweight_policy = config.lineweight_policy
         if config.min_lineweight:
@@ -460,6 +582,16 @@ def add_path_to_shape(shape, path: BkPath2d, close: bool) -> None:
         last_point = end
     if close and not sub_path_start.isclose(last_point):
         shape.draw_line(last_point, sub_path_start)
+
+
+def _fmt(value: float) -> str:
+    # PDF does not support the exponential notation
+    s = f"{value:.9f}".rstrip("0").rstrip(".")
+    return "0" if s == "-0" else s
+
+
+def _fmt_vec(v: Vec2) -> str:
+    return f"{v.x:.3f} {v.y:.3f}"
 
 
 def map_lineweight_to_stroke_width(
