@@ -219,6 +219,19 @@ class ClippingPortal:
         self.foreach_stage(do)
         return result
 
+    def is_completely_inside(self, bbox: BoundingBox2d) -> bool:
+        """Returns ``True`` if the bounding box `bbox` is completely inside all
+        clipping stages.
+        """
+        for stage in self._stages[::-1]:
+            if stage.transform is not None:
+                bbox = BoundingBox2d(
+                    stage.transform.fast_2d_transform(bbox.rect_vertices())
+                )
+            if not stage.portal.is_completely_inside(bbox):
+                return False
+        return True
+
     def transform_matrix(self, m: Matrix44) -> Matrix44:
         for _, transform in self._stages[::-1]:
             if transform is not None:

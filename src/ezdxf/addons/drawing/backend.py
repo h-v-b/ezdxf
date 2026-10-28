@@ -272,10 +272,15 @@ class BackendInterface(ABC):
         font: AbstractFont,
         cap_height: float,
     ) -> None:
-        """Handle rendering of text with `TextPolicy.NATIVE`. If the backend does not support
-        text data then this method can do nothing.
+        """Handle rendering of text with `TextPolicy.NATIVE`.
+
+        The default implementation renders the text as filled glyph paths, backends
+        which support native text can override this method.
         """
-        pass
+        glyph_paths = font.text_glyph_paths(text, cap_height)
+        for p in glyph_paths:
+            p.transform_inplace(transform)
+        self.draw_filled_paths(glyph_paths, properties)
 
     @abstractmethod
     def clear(self) -> None:

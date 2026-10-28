@@ -214,7 +214,7 @@ class PyMuPdfRenderBackend(BackendInterface):
         )
         self.settings = settings
         self._optional_content_groups: dict[str, int] = {}
-        self._fonts: dict[str, int] = {}
+        self._fonts: dict[str, str] = {}
         self._stroke_width_cache: dict[float, float] = {}
         self._color_cache: dict[str, tuple[float, float, float]] = {}
         self._tiling_patterns: dict[tuple, str] = {}
@@ -255,6 +255,9 @@ class PyMuPdfRenderBackend(BackendInterface):
         self.pdf_matrix = Matrix44([a, b, 0, 0, c, d, 0, 0, 0, 0, 1, 0, e, f, 0, 1])
         
     def get_pdf_bytes(self) -> bytes:
+        if self._fonts:
+            # embed only the used glyphs
+            self.doc.subset_fonts()
         return self.doc.tobytes()
 
     def get_pixmap(self, dpi: int, alpha=False):
@@ -545,14 +548,20 @@ class PyMuPdfRenderBackend(BackendInterface):
         doc.xref_set_key(xref, key, value)
         self._page_resources.add(name)
 
-    def register_font(self, font: AbstractFont) -> int:
-        if font.name not in self._fonts:
-            logger.info("registering font %s", font.name)
-            path = font_manager.get_font_path(font.name)
-            self._fonts[font.name] = self.page.insert_font(
-                fontname=font.name, fontfile=path
-            )
-        return self._fonts[font.name]
+    def register_font(self, font: AbstractFont) -> str:
+        """Returns the PDF resource name of the font."""
+        try:
+            return self._fonts[font.name]
+        except KeyError:
+            pass
+        logger.info("registering font %s", font.name)
+        # PDF names do not support all characters, e.g. spaces
+        name = "".join(c for c in font.name if c.isalnum()) or "F"
+        name = f"{name}{len(self._fonts)}"
+        path = font_manager.get_font_path(font.name)
+        self.page.insert_font(fontname=name, fontfile=str(path))
+        self._fonts[font.name] = name
+        return name
 
     def draw_text(
         self,
@@ -563,7 +572,7 @@ class PyMuPdfRenderBackend(BackendInterface):
         font: AbstractFont,
         cap_height: float,
     ) -> None:
-        self.register_font(font)
+        fontname = self.register_font(font)
         origin = transform.origin
         transform = copy.deepcopy(transform)
         transform *= Matrix44.translate(-origin.x, -origin.y, -origin.z)
@@ -572,18 +581,21 @@ class PyMuPdfRenderBackend(BackendInterface):
         # last two entries must be 0 as translation is not allowed
         m = pymupdf.Matrix(a, b, c, d, 0, 0)
         p = pymupdf.Point(origin.x, origin.y)
-        self.page.insert_text(
+        shape = self.content_shape
+        shape.insert_text(
             origin.vec2,
             text,
-            fontname=font.name,
-            # scaling factor is empirically derived by rendering with this method
-            # as well as the frontend at the same time.
-            fontsize=cap_height * 1.375,
+            fontname=fontname,
+            fontsize=get_font_size(font, cap_height),
             render_mode=0,
             morph=(p, m),
             color=self.resolve_color(properties.color),
+            fill_opacity=alpha_to_opacity(properties.color[7:9]),
             oc=self.get_optional_content_group(properties.layer),
         )
+        # keep the drawing order of text and graphics
+        shape.totalcont += shape.text_cont
+        shape.text_cont = ""
 
     def configure(self, config: Configuration) -> None:
         self.lineweight_policy = config.lineweight_policy
@@ -627,6 +639,17 @@ def add_path_to_shape(shape, path: BkPath2d, close: bool) -> None:
         last_point = end
     if close and not sub_path_start.isclose(last_point):
         shape.draw_line(last_point, sub_path_start)
+
+
+def get_font_size(font: AbstractFont, cap_height: float) -> float:
+    """Returns the PDF font size (em size) for the given cap height."""
+    glyph_cache: Any = getattr(font, "glyph_cache", None)
+    try:
+        units_per_em = glyph_cache.font["head"].unitsPerEm
+        return cap_height * units_per_em / glyph_cache.font_measurements.cap_height
+    except (AttributeError, KeyError, ZeroDivisionError):
+        # empirically derived scaling factor
+        return cap_height * 1.375
 
 
 def _fmt(value: float) -> str:

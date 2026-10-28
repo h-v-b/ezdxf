@@ -507,6 +507,9 @@ def crop_records_rect(
                     points.extend(segment)
             record.lines = NumpyPoints2d(points)
             cropped_records.append(record)
+        elif isinstance(record, TextRecord):
+            # text cannot be cropped, partially visible text is kept
+            cropped_records.append(record)
         elif isinstance(record, ImageRecord):
             pass
             # TODO: Image cropping not supported

@@ -370,20 +370,31 @@ class RenderPipeline2d(AbstractPipeline):
                 properties.filling = Filling()
             pipeline.draw_filled_polygon(BkPoints2d(bbox.rect_vertices()), properties)
             return
-        if text_policy == TextPolicy.NATIVE:
+        if text_policy == TextPolicy.NATIVE and not self.text_engine.is_stroke_font(
+            font_face
+        ):
             bbox = self._text_bbox(transformed_paths)
             if bbox is None:
                 return
-            abstract_font = self.text_engine.get_font(font_face)
-            self.backend.draw_text(
-                text,
-                bbox,
-                transform,
-                self.get_backend_properties(properties),
-                abstract_font,
-                cap_height,
-            )
-            return
+            clipping_portal = self.clipping_portal
+            # partially clipped text is rendered as filled glyph paths
+            if not clipping_portal.is_active or clipping_portal.is_completely_inside(
+                bbox
+            ):
+                if clipping_portal.is_active:
+                    # the clipping stages can transform the content, e.g. VIEWPORT
+                    m = clipping_portal.transform_matrix(Matrix44())
+                    bbox = BoundingBox2d(m.fast_2d_transform(bbox.rect_vertices()))
+                    transform = transform @ m
+                self.backend.draw_text(
+                    text,
+                    bbox,
+                    transform,
+                    self.get_backend_properties(properties),
+                    self.text_engine.get_font(font_face),
+                    cap_height,
+                )
+                return
 
         if (
             self.text_engine.is_stroke_font(font_face)
