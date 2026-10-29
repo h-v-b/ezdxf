@@ -893,6 +893,11 @@ class UniversalFrontend:
                 properties.filling = Filling()
                 self.pipeline.draw_filled_polygon(points, properties)
             return
+        if properties.linetype_pattern and not entity.dxf.flags & 128:
+            # PLINEGEN off restarts at each original segment, including bulges.
+            for segment in entity.virtual_entities():
+                self.pipeline.draw_path(make_path(segment), properties)
+            return
         polyline_path = make_path(entity)
         if len(polyline_path):
             self.pipeline.draw_path(polyline_path, properties)
