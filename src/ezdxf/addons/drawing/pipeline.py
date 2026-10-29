@@ -215,6 +215,7 @@ class RenderPipeline2d(AbstractPipeline):
             pass
         self.clipping_portal = ClippingPortal()
         self.current_vp_scale = 1.0
+        self.current_psltscale = False
         self._current_entity_handle: str = ""
         self._color_mapping: dict[str, str] = dict()
         self._pipeline = self.build_render_pipeline()
@@ -223,21 +224,21 @@ class RenderPipeline2d(AbstractPipeline):
         backend_stage = BackendStage2d(
             self.backend, converter=self.get_backend_properties
         )
-        linetype_stage = LinetypeStage2d(
+        clipping_stage = ClippingStage2d(
+            self.config, self.clipping_portal, next_stage=backend_stage
+        )
+        # Pattern in entity coordinates: clipping must not restart its phase.
+        return LinetypeStage2d(
             self.config,
             get_ltype_scale=self.get_vp_ltype_scale,
-            next_stage=backend_stage,
+            next_stage=clipping_stage,
         )
-        clipping_stage = ClippingStage2d(
-            self.config, self.clipping_portal, next_stage=linetype_stage
-        )
-        return clipping_stage
 
     def get_vp_ltype_scale(self) -> float:
-        """The linetype pattern should look the same in all viewports
-        regardless of the viewport scale.
-        """
-        return 1.0 / max(self.current_vp_scale, 0.0001)  # max out at 1:10000
+        """PSLTSCALE=1 keeps paper-space dash lengths equal across viewports."""
+        if self.current_psltscale:
+            return 1.0 / max(self.current_vp_scale, 0.0001)
+        return 1.0
 
     def get_backend_properties(self, properties: Properties) -> BackendProperties:
         try:
@@ -303,6 +304,7 @@ class RenderPipeline2d(AbstractPipeline):
     def enter_viewport(self, vp: Viewport) -> bool:
         """Set current viewport, returns ``True`` for valid viewports."""
         self.current_vp_scale = vp.get_scale()
+        self.current_psltscale = bool(vp.doc and vp.doc.header.get("$PSLTSCALE", 1))
         m = vp.get_transformation_matrix()
         clipping_path = make_path(vp)
         if len(clipping_path):
@@ -326,6 +328,7 @@ class RenderPipeline2d(AbstractPipeline):
         self.clipping_portal.pop()
         # Reset viewport scaling: viewports cannot be nested!
         self.current_vp_scale = 1.0
+        self.current_psltscale = False
 
     def draw_text(
         self,
